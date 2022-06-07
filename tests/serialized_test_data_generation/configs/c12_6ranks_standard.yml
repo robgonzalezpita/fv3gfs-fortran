@@ -101,6 +101,7 @@ namelist:
     domains_stack_size: 3000000
     print_memory_usage: false
   fv_core_nml:
+    use_logp: true
     a_imp: 1.0
     adjust_dry_mass: false
     beta: 0.0

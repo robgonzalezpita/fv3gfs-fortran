@@ -20,7 +20,7 @@ EXPERIMENT_DIR=configs
 
 # use default pattern if no environment varaible is set
 if [ -z "${EXPERIMENT_PATTERN}" ] ; then
-    EXPERIMENT_PATTERN="*.yml"
+    EXPERIMENT_PATTERN="c12_6ranks_standard.yml"
 fi
 
 # unset FORTRAN_VERSION, if empty

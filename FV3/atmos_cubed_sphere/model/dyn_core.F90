@@ -1131,8 +1131,13 @@ contains
         !$ser savepoint PE_Halo-Out
         !$ser data pe=pe
         !$ser verbatim endif
+
         if ( flagstruct%use_logp ) then
+        !$ser savepoint Pln_Halo-In
+        !$ser data ptop=ptop pk3=pk3 delp=delp
              call pln_halo(is, ie, js, je, isd, ied, jsd, jed, npz, ptop, pk3, delp)
+             !$ser savepoint Pln_Halo-Out
+             !$ser data pk3=pk3
         else
            !$ser savepoint PK3_Halo-In
            !$ser data akap=akap pk3=pk3 delp=delp ptop=ptop
