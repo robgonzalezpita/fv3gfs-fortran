@@ -1,5 +1,6 @@
 module module_physics_driver
-
+  !$ser verbatim use mpi
+  !$ser verbatim USE m_serialize, ONLY: fs_is_serialization_on
   use machine,               only: kind_phys
   use physcons,              only: con_cp, con_fvirt, con_g, con_rd,    &
                                    con_rv, con_hvap, con_hfus,          &
@@ -699,6 +700,10 @@ module module_physics_driver
       real(kind=kind_phys), pointer :: adjsfcdlw_for_lsm(:), adjsfcdsw_for_lsm(:), adjsfcnsw_for_lsm(:)
       real(kind=kind_phys), pointer :: sea_surface_temperature(:)
       integer :: nwat
+      !$ser verbatim integer :: mpi_rank,ier
+      !$ser verbatim logical :: ser_on
+      !$ser verbatim  call mpi_comm_rank(MPI_COMM_WORLD, mpi_rank,ier)
+      !$ser verbatim print *, 'INFO: inside GFS_physics_driver'
 
       !! Initialize local variables (mainly for debugging purposes, because the
       !! corresponding variables Interstitial(nt)%... are reset to zero every time);
@@ -1049,8 +1054,15 @@ module module_physics_driver
                    Statein%prsl, Statein%prslk, Statein%phii, Statein%phil, del)
 #else
 !GFDL   Adjust the geopotential height hydrostatically in a way consistent with FV3 discretization
+
+      !$ser savepoint PrsFV3-In
+      !$ser data prs_ix=ix prs_levs=levs prs_ntrac=ntrac prs_phii=Statein%phii prs_prsi=Statein%prsi
+      !$ser data prs_tgrs=Statein%tgrs prs_qgrs=Statein%qgrs 
+      !$ser data prs_del=del prs_del_gz=del_gz
       call get_prs_fv3 (ix, levs, ntrac, Statein%phii, Statein%prsi,    &
                         Statein%tgrs, Statein%qgrs, del, del_gz)
+      !$ser savepoint PrsFV3-Out
+      !$ser data prs_del=del prs_del_gz=del_gz
 #endif
 
       do i = 1, IM
@@ -1410,7 +1422,7 @@ module module_physics_driver
 !           faster model time steps.
 !      sw:  using cos of zenith angle as scaling factor
 !      lw:  using surface air skin temperature as scaling factor
-
+#ifndef AI2_SUBSET_PHYSICS
       if (Model%pre_rad) then
         call dcyc2t3_pre_rad                                                &
 !  ---  inputs:
@@ -1455,7 +1467,8 @@ module module_physics_driver
 !
 ! save temp change due to radiation - need for sttp stochastic physics
 !---------------------------------------------------------------------
-      endif
+     endif
+#endif
 !
       if (Model%lsidea) then                       !idea jw
         dtdt(:,:) = zero
@@ -2122,6 +2135,40 @@ module module_physics_driver
         enddo
       endif
 
+      ! Prescribe sea ice from a file.  Ported from the GFDL SHiELD_physics repository:
+      ! https://github.com/NOAA-GFDL/SHiELD_physics/blob/main/GFS_layer/GFS_physics_driver.F90
+      if (Model%use_prescribed_sea_surface_properties) then
+        do i= 1, im
+          if (Statein%prescribed_sea_ice_fraction(i) > -1. .and. Statein%prescribed_sea_ice_fraction(i) < 2.) then !Avoid bad values
+            if (Statein%prescribed_sea_ice_fraction(i) >= 0.15 .and. islmsk(i) == 0) then !create sea ice
+                Sfcprop%fice(i) = Statein%prescribed_sea_ice_fraction(i)
+                Sfcprop%slmsk(i) = 2
+                Sfcprop%hice(i) = 0.1 !minimum value
+            elseif (islmsk(i) == 2) then
+                if (Statein%prescribed_sea_ice_fraction(i) < 0.15) then !remove sea ice
+                  Sfcprop%slmsk(i) = 0
+                  Sfcprop%fice(i) = 0.0
+                  Sfcprop%hice(i) = 0.0
+                else
+                  Sfcprop%fice(i) = Statein%prescribed_sea_ice_fraction(i)
+                endif
+            endif
+          endif
+        enddo
+      endif
+
+      ! Prescribe sea surface temperature from a file.  Ported from the GFDL SHiELD_physics repository:
+      ! https://github.com/NOAA-GFDL/SHiELD_physics/blob/main/GFS_layer/GFS_physics_driver.F90
+      if (Model%use_prescribed_sea_surface_properties) then
+        do i = 1, im 
+           if (islmsk(i) == 0 ) then
+             Sfcprop%tsfc(i) = Statein%prescribed_sea_surface_temperature(i) + Model%sst_perturbation
+             Sfcprop%tsfco(i) = Statein%prescribed_sea_surface_temperature(i) + Model%sst_perturbation
+             tsfc3(i,3) = Statein%prescribed_sea_surface_temperature(i) + Model%sst_perturbation
+           endif
+        enddo
+      endif
+
       do i=1,im
         Diag%epi(i)     = ep1d(i)
         Diag%dlwsfci(i) = adjsfcdlw_for_lsm(i)
@@ -2387,6 +2434,7 @@ module module_physics_driver
           !      stop
           !  end if
           elseif (.not. Model%old_monin) then
+#ifndef AI2_SUBSET_PHYSICS
             call moninq(ix, im, levs, nvdiff, ntcw, dvdt, dudt, dtdt, dqdt,         &
                         Statein%ugrs, Statein%vgrs, Statein%tgrs, Statein%qgrs,     &
                         Radtend%htrsw, Radtend%htrlw, xmu, Statein%prsik(1,1), rb,  &
@@ -2397,6 +2445,7 @@ module module_physics_driver
                         gamt, gamq, dkt, kinver, Model%xkzm_m, Model%xkzm_h,        &
                         Model%xkzm_s, lprnt, ipr,                                   &
                         Model%xkzminv, Model%moninq_fac, Model%rbcr)
+#endif
           else
             if (Model%mstrat) then
               call moninp1(ix, im, levs, nvdiff, dvdt, dudt, dtdt, dqdt,            &
@@ -2652,7 +2701,11 @@ module module_physics_driver
         if (ntke > 0) then
           do k=1,levs
             do i=1,im
-              dqdt(i,k,ntke)  = dvdftra(i,k,ntkev)
+#ifdef AI2_SUBSET_PHYSICS
+               dqdt(i,k,ntke)  = 0.
+#else
+               dqdt(i,k,ntke)  = dvdftra(i,k,ntkev)
+#endif
             enddo
           enddo
         endif
@@ -3116,13 +3169,22 @@ module module_physics_driver
 
       do k=1,levs
         do i=1,im
-          Stateout%gt0(i,k)  = Statein%tgrs(i,k) + dtdt(i,k) * dtp
-          Stateout%gu0(i,k)  = Statein%ugrs(i,k) + dudt(i,k) * dtp
-          Stateout%gv0(i,k)  = Statein%vgrs(i,k) + dvdt(i,k) * dtp
+#ifdef AI2_SUBSET_PHYSICS
+        Stateout%gt0(i,k)  = Statein%tgrs(i,k)
+        Stateout%gu0(i,k)  = Statein%ugrs(i,k)
+        Stateout%gv0(i,k)  = Statein%vgrs(i,k)
+#else 
+        Stateout%gt0(i,k)  = Statein%tgrs(i,k) + dtdt(i,k) * dtp 
+        Stateout%gu0(i,k)  = Statein%ugrs(i,k) + dudt(i,k) * dtp
+        Stateout%gv0(i,k)  = Statein%vgrs(i,k) + dvdt(i,k) * dtp
+#endif
         enddo
       enddo
+#ifdef AI2_SUBSET_PHYSICS
+      Stateout%gq0(1:im,:,:) = Statein%qgrs(1:im,:,:)
+#else
       Stateout%gq0(1:im,:,:) = Statein%qgrs(1:im,:,:) + dqdt(1:im,:,:) * dtp
-
+#endif
 !================================================================================
 !     above: updates of the state by UGWP oro-GWS and RF-damp
 !  Diag%tav_ugwp & Diag%uav_ugwp(i,k)-Updated U-T state before moist/micro !  physics
@@ -3166,12 +3228,14 @@ module module_physics_driver
 !            enddo
 !          endif
         else
+#ifndef AI2_SUBSET_PHYSICS
           call ozphys (ix, im, levs, levozp, dtp,                 &
                        Stateout%gq0(1,1,ntoz),                    &
                        Stateout%gq0(1,1,ntoz),                    &
                        Stateout%gt0, oz_pres, Statein%prsl,       &
                        Tbd%ozpl, oz_coeff, del, Model%ldiag3d,    &
                        dq3dt_loc(1,1,6), me)
+#endif
 !          if (Model%ldiag3d) then
 !            do k=1,levs
 !              do i=1,im
@@ -3247,8 +3311,14 @@ module module_physics_driver
                    Statein%prsl, Statein%prslk, Statein%phii, Statein%phil)
 #else
 !GFDL   Adjust the height hydrostatically in a way consistent with FV3 discretization
+
+      !$ser savepoint PhiFV3-In
+      !$ser data phi_ix=ix phi_levs=levs phi_ntrac=ntrac phi_gt0=Stateout%gt0 phi_gq0=Stateout%gq0
+      !$ser data phi_del_gz=del_gz phi_phii=Statein%phii phi_phil=Statein%phil
       call get_phi_fv3 (ix, levs, ntrac, Stateout%gt0, Stateout%gq0, &
                         del_gz, Statein%phii, Statein%phil)
+      !$ser savepoint PhiFV3-Out
+      !$ser data phi_del_gz=del_gz phi_phii=Statein%phii phi_phil=Statein%phil
 #endif
 
       do k=1,levs
@@ -4579,6 +4649,9 @@ module module_physics_driver
               Diag%zhao_carr_physics%humidity = (Stateout%gq0(1:im,1:levs, 1) - dqdt(:,:,1)) / dtp
               Diag%zhao_carr_physics%cloud_water = (Stateout%gq0(1:im,1:levs,ntcw) - dqdt(:,:,ntcw)) / dtp
               Diag%zhao_carr_physics%temperature = (Stateout%gt0(1:im,1:levs) - dtdt) / dtp
+              if (Model%emulate_gscond_only) then
+                call adjust_zhao_carr_physics_diags_gscond_only(Diag)
+              end if
             end if
             ! rain1 has units m, and represents surface precip over dtp
             Diag%zhao_carr_physics%surface_precipitation = rain1 / dtp * rhowater
@@ -4984,6 +5057,14 @@ module module_physics_driver
           enddo
 
           if ( Model%do_gfdl_mp_in_physics ) then
+
+            !$ser savepoint Microph-In
+            !$ser data mph_qv1=qv1 mph_ql1=ql1 mph_qr1=qr1 mph_qi1=qi1 mph_qs1=qs1 mph_qg1=qg1 mph_qa1=qa1 mph_qn1=qn1 mph_qv_dt=qv_dt
+            !$ser data mph_ql_dt=ql_dt mph_qr_dt=qr_dt mph_qi_dt=qi_dt mph_qs_dt=qs_dt mph_qg_dt=qg_dt mph_qa_dt=qa_dt
+            !$ser data mph_pt_dt=pt_dt mph_pt=pt mph_w=w mph_uin=uin mph_vin=vin mph_udt=udt mph_vdt=vdt mph_dz=dz mph_delp=delp
+            !$ser data mph_area=area mph_dtp_in=dtp mph_land=land mph_rain0=rain0 mph_snow0=snow0 mph_ice0=ice0 mph_graupel0=graupel0
+            !$ser data mph_im=im mph_levs=levs mph_seconds=seconds mph_p123=p123 mph_lradar=Model%lradar
+            !$ser data mph_refl=refl mph_reset=reset mph_ntcw=ntcw mph_ntrw=ntrw mph_ntiw=ntiw mph_ntgl=ntgl mph_ntclamt=ntclamt
             call gfdl_cloud_microphys_driver(qv1, ql1, qr1, qi1, qs1, qg1, qa1, &
                                              qn1, qv_dt, ql_dt, qr_dt, qi_dt,   &
                                              qs_dt, qg_dt, qa_dt, pt_dt, pt, w, &
@@ -4993,6 +5074,12 @@ module module_physics_driver
                                              1, im, 1, 1, 1, levs, 1, levs,     &
                                              seconds,p123,Model%lradar,refl,    &
                                              reset)
+            !$ser savepoint Microph-Out
+            !$ser data mph_qi1=qi1 mph_qs1=qs1 mph_qv_dt=qv_dt
+            !$ser data mph_ql_dt=ql_dt mph_qr_dt=qr_dt mph_qi_dt=qi_dt mph_qs_dt=qs_dt mph_qg_dt=qg_dt mph_qa_dt=qa_dt
+            !$ser data mph_pt_dt=pt_dt mph_w=w mph_udt=udt mph_vdt=vdt
+            !$ser data mph_rain0=rain0 mph_snow0=snow0 mph_ice0=ice0 mph_graupel0=graupel0
+            !$ser data mph_refl=refl
           endif
 
           tem = dtp * con_p001 / con_day
@@ -6032,8 +6119,39 @@ module module_physics_driver
         delp = initial_mass_of_dry_air_plus_vapor * dry_air_plus_hydrometeor_mass_fraction_after_physics
       end subroutine compute_updated_delp_following_dynamics_definition
 
-#ifdef ENABLE_CALLPYFORT
+      subroutine adjust_zhao_carr_physics_diags_gscond_only(Diag)
+        type (GFS_diag_type), intent(inout) :: Diag
 
+        call adjust_total_physics_tendency_gscond_only(&
+          Diag%zhao_carr_physics%humidity,&
+          Diag%gscond_physics%humidity,&
+          Diag%gscond_emulator%humidity&
+        )
+
+        call adjust_total_physics_tendency_gscond_only(&
+          Diag%zhao_carr_physics%temperature,&
+          Diag%gscond_physics%temperature,&
+          Diag%gscond_emulator%temperature&
+        )
+
+        call adjust_total_physics_tendency_gscond_only(&
+          Diag%zhao_carr_physics%cloud_water,&
+          Diag%gscond_physics%cloud_water,&
+          Diag%gscond_emulator%cloud_water&
+        )
+      end subroutine
+
+      !> Adjust the total physics tendency in the gscond-only case
+      !> The total tendency is defined as gscond_physics + precpd_physics
+      subroutine adjust_total_physics_tendency_gscond_only(total, gscond_physics, gscond_emulator)
+        real(kind=kind_phys), intent(inout) :: total(:, :)
+        real(kind_phys), intent(in), dimension(:, :) :: gscond_physics, gscond_emulator
+        ! have g_emu + p_phys, g_emu, and g_phys
+        ! want g_phys + p_phys = (g_emu + p_phys) - g_emu + g_phys
+        total = total - gscond_emulator + gscond_physics
+      end subroutine
+
+#ifdef ENABLE_CALLPYFORT
       subroutine apply_python_gscond_updates_to_tbd(Tbd)
         type(GFS_tbd_type), intent(inout) :: Tbd
         call get_state("air_temperature_after_gscond", Tbd%phy_f3d(:, :, 1))
@@ -6090,7 +6208,6 @@ module module_physics_driver
         Diag%gscond_emulator%temperature = (tp_cpf(1:im,1:levs) - t_before_gscond) / timestep
 
       end subroutine
-
 #endif
 
 !> @}

@@ -118,7 +118,8 @@ use FV3GFS_io_mod,      only: FV3GFS_restart_read, FV3GFS_restart_write, &
                               FV3GFS_diag_register, FV3GFS_diag_output,  &
                               DIAG_SIZE, FV3GFS_restart_write_coarse,    &
                               FV3GFS_diag_register_coarse, &
-                              send_diag_manager_controlled_diagnostic_data
+                              send_diag_manager_controlled_diagnostic_data, &
+                              sfc_data_override
 use fv_iau_mod,         only: iau_external_data_type,getiauforcing,iau_initialize
 use module_fv3_config,  only: output_1st_tstep_rst, first_kdt, nsout
 !-----------------------------------------------------------------------
@@ -171,7 +172,7 @@ public Atm_block, IPD_Data, IPD_Control
                                                          ! to calculate gradient on cubic sphere grid.
 !</PUBLICTYPE >
 
-integer :: fv3Clock, getClock, updClock, setupClock, radClock, physClock, diagClock, otherClock
+integer :: fv3Clock, getClock, overrideClock, updClock, setupClock, radClock, physClock, diagClock, otherClock
 
 !-----------------------------------------------------------------------
 integer :: blocksize    = 1
@@ -183,10 +184,16 @@ logical :: disable_phys_restart_write = .false.
 integer, parameter     :: maxhr = 65536
 real, dimension(maxhr) :: fdiag = 0.
 real                   :: fhmax=384.0, fhmaxhf=120.0, fhout=3.0, fhouthf=1.0,avg_max_length=3600.
+
+! To restore previous behavior and output diagnostics following what is
+! prescribed by the fdiag, fhmax, fhmaxhf, fhout, and fhouthf parameters, set
+! the use_fdiag flag to .true.
+logical :: use_fdiag = .false.  
+
 #ifdef CCPP
-namelist /atmos_model_nml/ blocksize, chksum_debug, dycore_only, debug, sync, fdiag, fhmax, fhmaxhf, fhout, fhouthf, disable_phys_restart_write, ccpp_suite, avg_max_length
+namelist /atmos_model_nml/ blocksize, chksum_debug, dycore_only, debug, sync, fdiag, fhmax, fhmaxhf, fhout, fhouthf, disable_phys_restart_write, ccpp_suite, avg_max_length, use_fdiag
 #else
-namelist /atmos_model_nml/ blocksize, chksum_debug, dycore_only, debug, sync, fdiag, fhmax, fhmaxhf, fhout, fhouthf, disable_phys_restart_write, avg_max_length
+namelist /atmos_model_nml/ blocksize, chksum_debug, dycore_only, debug, sync, fdiag, fhmax, fhmaxhf, fhout, fhouthf, disable_phys_restart_write, avg_max_length, use_fdiag
 #endif
 
 type (time_type) :: diag_time, diag_time_fhzero
@@ -290,6 +297,11 @@ subroutine update_atmos_radiation_physics (Atmos)
     call atmos_phys_driver_statein (IPD_data, Atm_block, flip_vc)
     call mpp_clock_end(getClock)
 
+    ! Get prescribed sea surface temperatures and sea ice (if using)
+    call mpp_clock_begin(overrideClock)
+    call sfc_data_override(Atmos%Time, IPD_data, Atm_block, IPD_Control)
+    call mpp_clock_end(overrideClock)
+
 !--- if dycore only run, set up the dummy physics output state as the input state
     if (dycore_only) then
       call mpp_clock_begin(updClock)
@@ -348,7 +360,7 @@ subroutine update_atmos_radiation_physics (Atmos)
       endif
 
       call mpp_clock_end(setupClock)
-
+#ifndef AI2_SUBSET_PHYSICS
       if (mpp_pe() == mpp_root_pe() .and. debug) write(6,*) "radiation driver"
 
 !--- execute the IPD atmospheric radiation subcomponent (RRTM)
@@ -371,7 +383,7 @@ subroutine update_atmos_radiation_physics (Atmos)
       enddo
 #endif
       call mpp_clock_end(radClock)
-
+#endif
       call mpp_clock_begin(otherClock)
       if (chksum_debug) then
         if (mpp_pe() == mpp_root_pe()) print *,'RADIATION STEP  ', IPD_Control%kdt, IPD_Control%fhour
@@ -396,6 +408,9 @@ subroutine update_atmos_radiation_physics (Atmos)
       do nb = 1,Atm_block%nblks
         call IPD_step (IPD_Control, IPD_Data(nb:nb), IPD_Diag, IPD_Restart, IPD_func0d=Func0d)
       enddo
+      !$ser savepoint GFSPhysicsDriver-Out
+      !$ser data IPD_gt0=IPD_Data(1)%Stateout%gt0 IPD_gu0=IPD_Data(1)%Stateout%gu0 IPD_gv0=IPD_Data(1)%Stateout%gv0 IPD_gq0=IPD_Data(1)%Stateout%gq0 
+      !$ser data IPD_qvapor=IPD_Data(1)%Stateout%gq0(:,:,1) IPD_qliquid=IPD_Data(1)%Stateout%gq0(:,:,2) IPD_rain=IPD_Data(1)%Stateout%gq0(:,:,3) IPD_qice=IPD_Data(1)%Stateout%gq0(:,:,4) IPD_snow=IPD_Data(1)%Stateout%gq0(:,:,5) IPD_qgraupel=IPD_Data(1)%Stateout%gq0(:,:,6) IPD_qcld=IPD_Data(1)%Stateout%gq0(:,:,9)  
 #endif
       call mpp_clock_end(physClock)
 
@@ -407,7 +422,7 @@ subroutine update_atmos_radiation_physics (Atmos)
       call mpp_clock_end(otherClock)
 
       if (mpp_pe() == mpp_root_pe() .and. debug) write(6,*) "stochastic physics driver"
-
+#ifndef AI2_SUBSET_PHYSICS
 !--- execute the IPD atmospheric physics step2 subcomponent (stochastic physics driver)
 
       call mpp_clock_begin(physClock)
@@ -425,7 +440,7 @@ subroutine update_atmos_radiation_physics (Atmos)
       enddo
 #endif
       call mpp_clock_end(physClock)
-
+#endif
       call mpp_clock_begin(otherClock)
       if (chksum_debug) then
         if (mpp_pe() == mpp_root_pe()) print *,'PHYSICS STEP2   ', IPD_Control%kdt, IPD_Control%fhour
@@ -781,6 +796,7 @@ subroutine atmos_model_init (Atmos, Time_init, Time, Time_step)
    diagClock  = mpp_clock_id( ' 3.7-Diagnostics', flags=clock_flag_default, grain=CLOCK_COMPONENT )
    ! 3.8-Write-restart is timed on the coupler_main.F90 level
    otherClock = mpp_clock_id( ' 3.9-Other', flags=clock_flag_default, grain=CLOCK_COMPONENT )
+   overrideClock = mpp_clock_id(' 3.10-sfc_data_override', flags=clock_flag_default, grain=CLOCK_COMPONENT )
 
 #ifdef CCPP
    ! Set flag for first time step of time integration
@@ -895,6 +911,7 @@ subroutine update_atmos_model_state (Atmos)
   integer :: rc
   real(kind=IPD_kind_phys) :: time_int, time_intfull
   integer :: is, ie, js, je, nk
+  logical :: is_diagnostics_time
 !
     call mpp_clock_begin(otherClock)
     call set_atmosphere_pelist()
@@ -925,7 +942,9 @@ subroutine update_atmos_model_state (Atmos)
       Atm(mytile)%coarse_graining%write_coarse_diagnostics, &
       IPD_Diag_coarse, Atm(mytile)%delp(is:ie,js:je,:), &
       Atmos%coarsening_strategy, Atm(mytile)%ptop)
-    if (ANY(nint(fdiag(:)*3600.0) == seconds) .or. (IPD_Control%kdt == first_kdt) .or. nsout > 0) then
+    is_diagnostics_time = (use_fdiag .and. (ANY(nint(fdiag(:)*3600.0) == seconds))) .or. &
+                          ((.not. use_fdiag) .and. (mod(seconds, nint(fhout * 3600.0)) == 0))
+    if (is_diagnostics_time .or. (IPD_Control%kdt == first_kdt) .or. nsout > 0) then
       if (mpp_pe() == mpp_root_pe()) write(6,*) "---isec,seconds",isec,seconds
       time_int = real(isec)
       if(Atmos%iau_offset > zero) then
